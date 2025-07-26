@@ -1,99 +1,179 @@
-# oci-setup
+```markdown
+# OCI Infrastructure Setup and Management Guide
 
-OCI Instance
-├── Boot Volume (30GB) - OS only, can be recreated
-│ ├── /boot
-│ ├── /etc
-│ └── /var (except Docker)
-└── Block Volume (50-200GB) - Your persistent data
-├── /data/docker - Docker data directory
-├── /data/apps - Application data
-├── /data/backups - Local backups
-└── /data/logs - Persistent logs
+A complete guide for setting up resilient Oracle Cloud Infrastructure (OCI) instances with persistent data storage and stable networking.
 
+## Overview
 
-This decoupled architecture ensures that a failure or restart of one service does not cause a cascading failure of the entire system.
+This repository contains tools and procedures to:
+1. **Prevent data loss** when instances fail (using block volumes)
+2. **Maintain stable public IPs** (converting ephemeral to reserved IPs)
+3. **Automate recovery** from common OCI issues
 
-## 1. Prerequisites
+## Repository Structure
+oci-setup/
+├── README.md                    # This file
+├── Makefile                     # Block volume setup & application deployment
+├── oci-ip-convert.mk           # Ephemeral to Reserved IP conversion
+├── disaster-recovery/          # Recovery scripts and procedures
+│   ├── instance-recovery.sh
+│   └── backup-restore.sh
+└── examples/                   # Example configurations
+    ├── docker-compose.yml
+    └── fstab.example
 
-*   Oracle Cloud account (Free Tier or PAYG)
-*   Running OCI instance (Oracle Linux 9 or Ubuntu 22.04/24.04)
-*   Block Volume attached via OCI Console (50GB minimum)
-*   SSH access to the instance
-*   Basic Linux command line knowledge
+## Why This Setup?
 
-## 2. Initial Setup - Block Volume Configuration
+### Common OCI Problems This Solves:
 
-### Step 2.1: Download and Prepare the Makefile
+1. **"Connection reset by peer" errors** after weeks/months of uptime
+2. **Lost data** when instances need to be recreated
+3. **Changing public IPs** that break integrations
+4. **Full boot volumes** causing instance failures
+
+### Our Solutions:
+
+| Problem | Solution | Tool |
+|---------|----------|------|
+| Data loss on instance failure | Separate block volume for data | `Makefile` |
+| Changing IPs on restart | Reserved (persistent) IPs | `oci-ip-convert.mk` |
+| Boot volume fills up | Docker/logs on block volume | `Makefile` |
+| Manual recovery is slow | Automated procedures | Both Makefiles |
+
+## Architecture
+
+```
+OCI Instance Setup
+├── Networking
+│   └── Reserved Public IP (Persistent)
+│       └── No more IP changes!
+├── Boot Volume (30GB)
+│   └── OS only - can be recreated anytime
+└── Block Volume (50-200GB)
+    ├── /data/docker     - Docker data
+    ├── /data/apps       - Applications
+    ├── /data/backups    - Local backups
+    └── /data/logs       - Persistent logs
+```
+
+## Quick Start
+
+### 1. Initial Instance Setup
 
 ```bash
-# Download the Makefile
-wget https://raw.githubusercontent.com/your-repo/oci-setup/main/Makefile
-# OR create it manually: nano Makefile (then paste content)
+# Clone this repository
+git clone https://github.com/your-org/oci-setup.git
+cd oci-setup
 
-# Check what the Makefile detected
+# Setup block volume for data persistence
+make -f Makefile all
+
+# Convert ephemeral IP to reserved (permanent) IP
+make -f oci-ip-convert.mk convert-ip-interactive
+```
+
+### 2. Deploy Your Application
+
+```bash
+# Move Docker to block volume
+make -f Makefile docker-setup
+
+# Deploy your application (example: trading system)
+make -f Makefile trading-deploy
+```
+
+## Detailed Guides
+
+### Part 1: Block Volume Setup (Data Persistence)
+
+This ensures your data survives instance failures.
+
+#### Prerequisites
+- OCI instance running (Oracle Linux 9 or Ubuntu 22.04/24.04)
+- Block volume attached via OCI Console (50GB minimum)
+- SSH access to instance
+
+#### Setup Commands
+
+```bash
+# Check system and find block device
 make check
 
-# See all available commands
-make help
-
-Step 2.2: One-Command Setup (Recommended)
-For a complete automated setup:
-
-# This will partition, format, mount, and configure the block volume
+# One-command complete setup (recommended)
 make all
 
-What happens:
+# OR step-by-step:
+make setup      # Create partition
+make format     # Format volume (WARNING: destroys data!)
+make mount      # Mount volume
+make permanent  # Add to /etc/fstab
+make test       # Verify setup
+```
 
-Creates partition on the attached block device
-Formats it as ext4 filesystem
-Mounts to /data
-Adds to /etc/fstab for persistence
-Tests read/write access
+#### What Gets Created
+- `/data` mount point for your block volume
+- Automatic mounting on reboot via `/etc/fstab`
+- Proper permissions for your user
 
-Step 2.3: Manual Step-by-Step (If Needed)
-If you prefer to run each step individually:
+### Part 2: Reserved IP Setup (Network Stability)
 
-# 1. Check system and find block device
-make check
+Convert ephemeral (temporary) IPs to reserved (permanent) IPs.
 
-# 2. Create partition on the device
-make setup
+#### Why Reserved IPs?
+- **Survive instance stops/restarts**
+- **Enable IP whitelisting** in external services
+- **Support DNS records** that won't break
+- **Required for production** workloads
 
-# 3. Format the partition (WARNING: Destroys any existing data!)
-make format
+#### Check Current IP Status
 
-# 4. Mount the volume
-make mount
+```bash
+# See all your IPs and their types
+make -f oci-ip-convert.mk audit-all-ips
 
-# 5. Make mounting permanent (survives reboot)
-make permanent
+# Check for instances with ephemeral IPs
+make -f oci-ip-convert.mk show-ephemeral-ips
 
-# 6. Test everything works
-make test
+# Verify no extra charges from unused IPs
+make -f oci-ip-convert.mk verify-ip-count
+```
 
-Step 2.4: Post-Setup Configuration
+#### Convert Ephemeral to Reserved IP
 
-# Install monitoring scripts
-make monitor
+```bash
+# Convert a specific instance (interactive)
+make -f oci-ip-convert.mk INSTANCE_NAME=your-instance-name convert-ip-interactive
 
-# Create backup scripts
-make backup
+# Convert all instances to reserved IPs
+make -f oci-ip-convert.mk convert-all-to-reserved
+```
 
-# View current configuration
-make info
+**⚠️ WARNING**: You will get a NEW IP address. The old IP cannot be kept!
 
-3. Docker and Application Setup
-Step 3.1: Move Docker to Block Volume
+#### Example Conversion Output
+```
+Current Ephemeral IP: 130.61.152.252 (will be deleted)
+Step 1: Deleting ephemeral IP... ✓
+Step 2: Creating reserved IP... ✓
+Step 3: Assigning reserved IP... ✓
+CONVERSION COMPLETE!
+New Reserved IP: 138.2.183.131
+```
 
+### Part 3: Docker and Application Setup
+
+Move Docker to block volume to prevent boot volume issues.
+
+```bash
 # Stop Docker
 sudo systemctl stop docker
 
-# Move Docker data
+# Move Docker data (automated)
+make -f Makefile docker-setup
+
+# Or manually:
 sudo mkdir -p /data/docker
 sudo mv /var/lib/docker/* /data/docker/
-
-# Configure Docker to use new location
 sudo tee /etc/docker/daemon.json << EOF
 {
   "data-root": "/data/docker",
@@ -105,144 +185,121 @@ sudo tee /etc/docker/daemon.json << EOF
 }
 EOF
 
-# Start Docker
+# Restart Docker
 sudo systemctl start docker
 docker info | grep "Docker Root Dir"
+```
 
-Step 3.2: Application Deployment Example
-Here's an example for deploying a trading application:
+## Maintenance and Operations
 
-# Create application directory
-mkdir -p /data/apps/trading-app
-cd /data/apps/trading-app
+### Daily Checks
 
-# Clone your application
-git clone https://github.com/your-org/trading-app.git .
+```bash
+# Check disk usage
+make -f Makefile status
 
-# Create secrets directory
-mkdir -p secrets
-chmod 700 secrets
+# Check IP configuration
+make -f oci-ip-convert.mk verify-ip-count
 
-# Create secret files (example)
-echo "YOUR_CLIENT_ID" > secrets/client_id.txt
-echo "YOUR_CLIENT_SECRET" > secrets/client_secret.txt
-chmod 600 secrets/*.txt
-
-# Deploy with Docker Compose
-docker compose up -d
-
-4. Daily Operations and Maintenance
-Monitoring Disk Usage
-
-# Quick check
-make status
-
-# Detailed usage
-df -h /data
-du -sh /data/*
-
-# Find large files
-find /data -type f -size +100M -exec ls -lh {} \;
-
-
-Backup Procedures
-
-# Manual backup
-make backup
-
-# Schedule automatic backups (add to crontab)
-crontab -e
-# Add: 0 2 * * * cd /home/ubuntu && make backup
-
-Docker Cleanup (Regular Maintenance)
-# Remove unused Docker data
+# Docker cleanup
 docker system prune -a -f
+```
 
-# Check Docker space usage
-docker system df
+### Backup Procedures
 
-# Clean old logs
-find /data/logs -name "*.log" -mtime +30 -delete
+```bash
+# Manual backup
+make -f Makefile backup
 
- Disaster Recovery Procedures
-Scenario 1: SSH Connection Lost
+# Schedule automatic backups
+crontab -e
+# Add: 0 2 * * * cd /path/to/oci-setup && make -f Makefile backup
+```
 
-# 1. Try OCI Console Connection (no SSH needed)
+## Disaster Recovery
+
+### Scenario 1: SSH Connection Lost
+
+```bash
+# Use OCI Console Connection (no SSH needed)
 # OCI Console → Instance → Console Connection → Create
 
-# 2. Once connected via console:
-df -h                      # Check if disk full
-systemctl status sshd      # Check SSH service
-journalctl -xe            # Check system logs
+# Once connected:
+df -h                          # Check disk space
+sudo journalctl --vacuum-time=7d   # Clean logs
+sudo systemctl restart sshd        # Restart SSH
+```
 
-# 3. Common fixes:
-sudo journalctl --vacuum-time=7d    # Clean logs
-sudo systemctl restart sshd          # Restart SSH
+### Scenario 2: Instance Won't Boot
 
-Scenario 2: Instance Won't Boot
+1. **Stop instance** (don't terminate!)
+2. **Detach boot volume**
+3. **Create new instance**
+4. **Attach block volume** to new instance
+5. **Run recovery**:
+   ```bash
+   make -f Makefile mount
+   make -f Makefile docker-setup
+   ```
+6. **Update DNS** to new reserved IP
 
-# 1. Stop instance (don't terminate!)
-# 2. Detach boot volume
-# 3. Your data is safe on block volume!
-# 4. Create new instance
-# 5. Attach block volume to new instance
-# 6. Run: make mount
-# 7. Continue working with your data intact
+### Scenario 3: Accidental IP Release
 
-Scenario 3: Restore from Backup
-# List available backups
-ls -la /data/backups/
+```bash
+# Create new reserved IP
+make -f oci-ip-convert.mk INSTANCE_NAME=your-instance create-reserved-ip
 
-# Restore specific backup
-cd /
-sudo tar -xzf /data/backups/data-20240115-020000.tar.gz
+# Assign to instance
+make -f oci-ip-convert.mk assign-reserved-ip
+```
 
-6. Best Practices
-Never store critical data on boot volume
+## Best Practices
 
-Boot volume = OS only
-Block volume = All your data
-Regular maintenance
+### 1. **Data Storage**
+- ❌ Never store critical data on boot volume
+- ✅ Always use block volume for persistent data
+- ✅ Keep boot volume under 80% usage
 
-Run docker system prune weekly
-Check disk usage daily
-Test backups monthly
-Monitor proactively
+### 2. **IP Management**
+- ✅ Use reserved IPs for production
+- ✅ Document IP addresses in your team wiki
+- ✅ Update DNS records immediately after IP changes
 
-Set up disk usage alerts
-Watch system logs
-Keep 20% free space
-Document everything
+### 3. **Regular Maintenance**
+- Run `docker system prune` weekly
+- Check disk usage daily: `make -f Makefile status`
+- Verify IP configuration monthly: `make -f oci-ip-convert.mk audit-all-ips`
+- Test backups quarterly
 
-Keep this README updated
-Document any custom configurations
-Note any issues and solutions
-7. Troubleshooting
-Block Volume Not Found
+### 4. **Monitoring Setup**
+```bash
+# Install monitoring
+make -f Makefile monitor
 
-# Check if volume is attached in OCI Console
-# Then run:
-lsblk
-# Look for unpartitioned disk (usually /dev/sdb)
+# Set up alerts for:
+# - Disk usage > 80%
+# - Memory usage > 90%
+# - SSH service down
+```
 
-Mount Fails After Reboot
+## Troubleshooting
 
-# Check /etc/fstab entry
-cat /etc/fstab | grep data
+### Block Volume Issues
 
-# Test mount
+```bash
+# Volume not found
+lsblk  # Should show unpartitioned disk
+
+# Mount fails after reboot
 sudo mount -a
-
-# Check for errors
 dmesg | tail
 
-Disk Full Errors
-
-# Find what's using space
-du -h /data | sort -rh | head -20
-
-# Clean Docker
-docker system prune -a -f
-
-# Clean logs
+# Disk full
+make -f Makefile clean-docker
 sudo journalctl --vacuum-time=3d
+```
+
+### IP Conversion Issues
+
+```bash
+# "Ephemeral IP cannot be moved or
