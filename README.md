@@ -302,4 +302,98 @@ sudo journalctl --vacuum-time=3d
 ### IP Conversion Issues
 
 ```bash
-# "Ephemeral IP cannot be moved or
+# "Ephemeral IP cannot be moved or unassigned" error
+# Solution: Must DELETE the ephemeral IP, not unassign it
+# This is handled automatically by the Makefile
+
+# "Private IP already has a public IP assigned" error
+# Solution: The ephemeral IP must be deleted first
+# Run from OCI Cloud Shell, not from the instance itself
+
+# Instance not found
+# Solution: Instance names are case-sensitive
+make -f oci-ip-convert.mk list-instances
+
+# New IP not accessible after conversion
+# Check security lists in OCI Console
+# Ensure SSH (port 22) is allowed for 0.0.0.0/0 or your IP
+```
+
+### Common Error Messages and Solutions
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Connection reset by peer` | Instance SSH failure | Use console connection, clean logs |
+| `No space left on device` | Boot volume full | Move Docker to block volume |
+| `InvalidParameter` | Trying to unassign ephemeral IP | Delete it instead (automated) |
+| `Device or resource busy` | Volume still mounted | Unmount before operations |
+
+## Advanced Usage
+
+### Using Both Makefiles Together
+
+```bash
+# Complete new instance setup
+./setup-new-instance.sh
+
+# Contents of setup-new-instance.sh:
+#!/bin/bash
+set -e
+
+echo "Setting up new OCI instance..."
+
+# 1. Setup block volume
+make -f Makefile all
+
+# 2. Convert to reserved IP
+INSTANCE_NAME=$(hostname)
+make -f oci-ip-convert.mk INSTANCE_NAME=$INSTANCE_NAME convert-ip-interactive
+
+# 3. Setup Docker on block volume
+make -f Makefile docker-setup
+
+# 4. Deploy applications
+make -f Makefile trading-deploy
+
+echo "Setup complete!"
+```
+
+### Automating IP Conversions for Multiple Instances
+
+```bash
+# Backup current IP configuration
+make -f oci-ip-convert.mk backup-ip-config
+
+# Convert all instances in compartment
+make -f oci-ip-convert.mk convert-all-to-reserved
+
+# Verify no unassigned IPs (avoid charges)
+make -f oci-ip-convert.mk cleanup-reserved-ips
+```
+
+### Custom Configurations
+
+```bash
+# Use different mount point
+make -f Makefile MOUNT_POINT=/mnt/data all
+
+# Use different user ownership
+make -f Makefile VOLUME_OWNER=opc:opc mount
+
+# Specify instance name for IP conversion
+make -f oci-ip-convert.mk INSTANCE_NAME=prod-web-01 convert-ip-interactive
+```
+
+## Cost Optimization
+
+### Reserved IP Pricing
+- **Assigned to running instance**: FREE
+- **Unassigned reserved IP**: ~$0.005/hour (~$3.60/month)
+
+### Check for Cost Issues
+```bash
+# Find unassigned reserved IPs
+make -f oci-ip-convert.mk cleanup-reserved-ips
+
+# Count resources
+make -f oci-ip
