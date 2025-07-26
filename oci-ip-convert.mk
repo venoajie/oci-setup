@@ -387,3 +387,8 @@ cleanup-reserved-ips:
 # - VNICs are attached to instances via VNIC Attachments
 # - Each VNIC has one primary Private IP
 # - Each Private IP can have at most one Public IP
+
+#commands:
+#make -f oci-ip-convert.mk help
+#make -f oci-ip-convert.mk verify-ip-count
+#make -f oci-ip-convert.mk audit-all-ips
