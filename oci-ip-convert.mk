@@ -358,6 +358,153 @@ cleanup-reserved-ips:
 	@echo "To delete an unassigned reserved IP:"
 	@echo "oci network public-ip delete --public-ip-id <PUBLIC-IP-OCID> --force"
 
+
+.PHONY: audit-all-ips show-ephemeral-ips convert-all-to-reserved backup-ip-config
+
+show-ephemeral-ips:
+	@echo "$(YELLOW)Checking for instances with ephemeral IPs...$(NC)"
+	@# This helps identify which instances still need conversion
+	@for instance_id in $$(oci compute instance list \
+		--compartment-id $(COMPARTMENT_ID) \
+		--all \
+		--query "data[?\"lifecycle-state\"=='RUNNING'].id" \
+		--raw-output); do \
+		\
+		INSTANCE_NAME=$$(oci compute instance get \
+			--instance-id $$instance_id \
+			--query "data.\"display-name\"" \
+			--raw-output); \
+		\
+		AD=$$(oci compute instance get --instance-id $$instance_id \
+			--query "data.\"availability-domain\"" --raw-output); \
+		\
+		# Get VNIC attachment and ID \
+		VNIC_ID=$$(oci compute vnic-attachment list \
+			--compartment-id $(COMPARTMENT_ID) \
+			--instance-id $$instance_id \
+			--query "data[0].\"vnic-id\"" \
+			--raw-output); \
+		\
+		# Get private IP \
+		PRIVATE_IP_ID=$$(oci network private-ip list \
+			--vnic-id $$VNIC_ID \
+			--query "data[0].id" \
+			--raw-output); \
+		\
+		# Check for ephemeral IP \
+		EPHEMERAL_IP=$$(oci network public-ip list \
+			--compartment-id $(COMPARTMENT_ID) \
+			--scope AVAILABILITY_DOMAIN \
+			--availability-domain "$$AD" \
+			--all \
+			--query "data[?\"private-ip-id\"=='$$PRIVATE_IP_ID' && \"lifetime\"=='EPHEMERAL'].\"ip-address\" | [0]" \
+			--raw-output); \
+		\
+		if [ ! -z "$$EPHEMERAL_IP" ] && [ "$$EPHEMERAL_IP" != "null" ]; then \
+			echo "$(YELLOW)Instance: $$INSTANCE_NAME - Ephemeral IP: $$EPHEMERAL_IP$(NC)"; \
+		fi; \
+	done
+
+convert-all-to-reserved:
+	@echo "$(YELLOW)Converting ALL ephemeral IPs to reserved IPs$(NC)"
+	@echo "$(RED)WARNING: This will change ALL public IPs for instances with ephemeral IPs!$(NC)"
+	@echo "Press Enter to continue or Ctrl+C to cancel..."; \
+	read dummy; \
+	@# Find and convert all ephemeral IPs
+	@for instance_id in $$(oci compute instance list \
+		--compartment-id $(COMPARTMENT_ID) \
+		--all \
+		--query "data[?\"lifecycle-state\"=='RUNNING'].id" \
+		--raw-output); do \
+		\
+		INSTANCE_NAME=$$(oci compute instance get \
+			--instance-id $$instance_id \
+			--query "data.\"display-name\"" \
+			--raw-output); \
+		\
+		echo ""; \
+		echo "Checking $$INSTANCE_NAME..."; \
+		$(MAKE) INSTANCE_NAME=$$INSTANCE_NAME convert-ip-automated || true; \
+	done
+
+backup-ip-config:
+	@echo "$(YELLOW)Backing up current IP configuration...$(NC)"
+	@BACKUP_FILE="oci-ip-backup-$$(date +%Y%m%d-%H%M%S).json"
+	@echo "Saving to: $$BACKUP_FILE"
+	@# Create a comprehensive backup of all IP configurations
+	@echo "{" > $$BACKUP_FILE
+	@echo "  \"backup_date\": \"$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> $$BACKUP_FILE
+	@echo "  \"compartment_id\": \"$(COMPARTMENT_ID)\"," >> $$BACKUP_FILE
+	@echo "  \"instances\": [" >> $$BACKUP_FILE
+	@FIRST=true; \
+	for instance_id in $$(oci compute instance list \
+		--compartment-id $(COMPARTMENT_ID) \
+		--all \
+		--query "data[*].id" \
+		--raw-output); do \
+		\
+		if [ "$$FIRST" != "true" ]; then echo "," >> $$BACKUP_FILE; fi; \
+		FIRST=false; \
+		\
+		INSTANCE_DATA=$$(oci compute instance get \
+			--instance-id $$instance_id \
+			--query "data.{name:\"display-name\", id:id, state:\"lifecycle-state\", ad:\"availability-domain\"}"); \
+		\
+		# Get VNIC and IP info \
+		VNIC_ID=$$(oci compute vnic-attachment list \
+			--compartment-id $(COMPARTMENT_ID) \
+			--instance-id $$instance_id \
+			--query "data[0].\"vnic-id\"" \
+			--raw-output 2>/dev/null || echo "null"); \
+		\
+		PUBLIC_IP="null"; \
+		IP_TYPE="null"; \
+		if [ "$$VNIC_ID" != "null" ]; then \
+			PUBLIC_IP=$$(oci network vnic get \
+				--vnic-id $$VNIC_ID \
+				--query "data.\"public-ip\"" \
+				--raw-output 2>/dev/null || echo "null"); \
+		fi; \
+		\
+		echo -n "    {" >> $$BACKUP_FILE; \
+		echo -n "\"instance\": $$INSTANCE_DATA, " >> $$BACKUP_FILE; \
+		echo -n "\"public_ip\": \"$$PUBLIC_IP\"" >> $$BACKUP_FILE; \
+		echo -n "}" >> $$BACKUP_FILE; \
+	done
+	@echo "" >> $$BACKUP_FILE
+	@echo "  ]" >> $$BACKUP_FILE
+	@echo "}" >> $$BACKUP_FILE
+	@echo "$(GREEN)✓ Backup saved to: $$BACKUP_FILE$(NC)"
+
+# Add to help target (update the existing help target):
+help:
+	@echo "OCI Ephemeral to Reserved IP Conversion Tool"
+	@echo "============================================"
+	@echo ""
+	@echo "PREREQUISITES:"
+	@echo "  1. OCI CLI installed and configured"
+	@echo "  2. Run from OCI Cloud Shell or machine with OCI access"
+	@echo "  3. Instance can be running or stopped"
+	@echo ""
+	@echo "TARGETS:"
+	@echo "  make check-env               - Verify environment and OCI CLI"
+	@echo "  make list-instances          - List all instances in compartment"
+	@echo "  make get-instance-details    - Get details for specific instance"
+	@echo "  make check-current-ip        - Check current IP configuration"
+	@echo "  make show-ephemeral-ips      - Show only instances with ephemeral IPs"
+	@echo "  make convert-ip-interactive  - Convert IP with prompts (RECOMMENDED)"
+	@echo "  make convert-ip-automated    - Convert IP without prompts"
+	@echo "  make convert-all-to-reserved - Convert ALL ephemeral IPs to reserved"
+	@echo "  make verify-ip-count         - Verify IP count matches instance count"
+	@echo "  make audit-all-ips           - Detailed audit of all IPs"
+	@echo "  make cleanup-reserved-ips    - List unassigned reserved IPs"
+	@echo "  make backup-ip-config        - Backup current IP configuration to JSON"
+	@echo ""
+	@echo "USAGE EXAMPLES:"
+	@echo "  make INSTANCE_NAME=your-instance-name convert-ip-interactive"
+	@echo "  make show-ephemeral-ips"
+	@echo "  make backup-ip-config"
+
 # AI/AUTOMATION TROUBLESHOOTING NOTES:
 # 
 # COMMON ERRORS AND SOLUTIONS:
